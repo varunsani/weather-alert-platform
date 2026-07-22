@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Weather Alert Platform - Test Client</title>
+<style>
+  body { font-family: monospace; max-width: 720px; margin: 2rem auto; background: #111; color: #ddd; }
+  h2 { border-bottom: 1px solid #444; padding-bottom: 4px; }
+  input, button { font-family: monospace; padding: 6px; margin: 4px 0; }
+  input { width: 220px; }
+  button { cursor: pointer; }
+  #log { background: #000; color: #0f0; padding: 10px; height: 260px; overflow-y: auto; white-space: pre-wrap; font-size: 12px; }
+  .row { margin-bottom: 6px; }
+</style>
+</head>
+<body>
+  <h1>Weather Alert Platform - Test Client</h1>
+
+  <h2>1. Auth</h2>
+  <div class="row">
+    <input id="username" placeholder="username" value="testuser">
+    <input id="password" placeholder="password" type="password" value="password123">
+    <input id="email" placeholder="email" value="test@example.com">
+  </div>
+  <div class="row">
+    <button onclick="register()">Register</button>
+    <button onclick="login()">Login</button>
+  </div>
+
+  <h2>2. Location + Subscription</h2>
+  <div class="row">
+    <input id="locName" placeholder="location name" value="Hyderabad">
+    <input id="lat" placeholder="latitude" value="17.385">
+    <input id="lon" placeholder="longitude" value="78.4867">
+  </div>
+  <div class="row">
+    <button onclick="createLocation()">Create/Get Location</button>
+    <button onclick="subscribe()">Subscribe</button>
+    <button onclick="getCurrent()">Query Current Weather</button>
+  </div>
+
+  <h2>3. Live Alerts (WebSocket)</h2>
+  <div class="row">
+    <button onclick="connectWs()">Connect WebSocket</button>
+    <button onclick="disconnectWs()">Disconnect</button>
+  </div>
+
+  <h2>Log</h2>
+  <div id="log"></div>
+
+<script>
+  const API_BASE = window.location.origin;
+  let accessToken = null, refreshToken = null, locationId = null, ws = null;
+
+  function log(msg) {
+    const el = document.getElementById('log');
+    el.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+    el.scrollTop = el.scrollHeight;
+  }
+
+  async function register() {
+    const body = {
+      username: document.getElementById('username').value,
+      email: document.getElementById('email').value,
+      password: document.getElementById('password').value,
+    };
+    const res = await fetch(`${API_BASE}/auth/register`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    log(`register -> ${res.status}: ${JSON.stringify(await res.json())}`);
+  }
+
+  async function login() {
+    const body = {
+      username: document.getElementById('username').value,
+      password: document.getElementById('password').value,
+    };
+    const res = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (res.ok) {
+      accessToken = data.access_token;
+      refreshToken = data.refresh_token;
+      log(`login OK. access_token acquired.`);
+    } else {
+      log(`login FAILED -> ${JSON.stringify(data)}`);
+    }
+  }
+
+  function authHeaders() {
+    return {'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}`};
+  }
+
+  async function createLocation() {
+    const body = {
+      name: document.getElementById('locName').value,
+      latitude: parseFloat(document.getElementById('lat').value),
+      longitude: parseFloat(document.getElementById('lon').value),
+    };
+    const res = await fetch(`${API_BASE}/locations`, {method: 'POST', headers: authHeaders(), body: JSON.stringify(body)});
+    const data = await res.json();
+    if (res.ok) { locationId = data.id; log(`location created/found -> id=${locationId}`); }
+    else log(`create location FAILED -> ${JSON.stringify(data)}`);
+  }
+
+  async function subscribe() {
+    if (!locationId) return log('Create a location first.');
+    const res = await fetch(`${API_BASE}/subscriptions`, {
+      method: 'POST', headers: authHeaders(), body: JSON.stringify({location_id: locationId})
+    });
+    log(`subscribe -> ${res.status}: ${JSON.stringify(await res.json())}`);
+  }
+
+  async function getCurrent() {
+    if (!locationId) return log('Create a location first.');
+    const res = await fetch(`${API_BASE}/weather/${locationId}/current`, {headers: authHeaders()});
+    log(`current weather -> ${JSON.stringify(await res.json())}`);
+  }
+
+  function connectWs() {
+    if (!accessToken) return log('Login first.');
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${window.location.host}/ws/alerts?token=${accessToken}`);
+    ws.onopen = () => log('WebSocket connected.');
+    ws.onmessage = (event) => log(`ALERT PUSH -> ${event.data}`);
+    ws.onclose = () => log('WebSocket closed.');
+    ws.onerror = (e) => log(`WebSocket error: ${JSON.stringify(e)}`);
+  }
+
+  function disconnectWs() {
+    if (ws) ws.close();
+  }
+</script>
+</body>
+</html>
