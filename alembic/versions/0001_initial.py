@@ -85,9 +85,6 @@ def upgrade() -> None:
     op.create_index("ix_weather_readings_location_id", "weather_readings", ["location_id"])
     op.create_index("ix_weather_readings_recorded_at", "weather_readings", ["recorded_at"])
 
-    alert_severity_enum.create(op.get_bind(), checkfirst=True)
-    alert_condition_enum.create(op.get_bind(), checkfirst=True)
-
     op.create_table(
         "alerts",
         sa.Column("id", sa.Integer(), primary_key=True),
