@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from sqlalchemy import Column, DateTime
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 
@@ -20,7 +21,10 @@ class Location(SQLModel, table=True):
     latitude: float = Field(nullable=False, index=True)
     longitude: float = Field(nullable=False, index=True)
     timezone: Optional[str] = Field(default=None, max_length=64)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
     subscriptions: List["Subscription"] = Relationship(back_populates="location")
     readings: List["WeatherReading"] = Relationship(back_populates="location")

@@ -2,6 +2,7 @@ import enum
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import Column, DateTime
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -33,7 +34,10 @@ class Alert(SQLModel, table=True):
     condition_type: AlertConditionType = Field(nullable=False, index=True)
     message: str = Field(nullable=False, max_length=512)
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
+    )
 
     location: Optional["Location"] = Relationship(back_populates="alerts")
     reading: Optional["WeatherReading"] = Relationship(back_populates="alerts")

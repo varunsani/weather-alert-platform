@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from sqlalchemy import Column, DateTime
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -15,7 +16,10 @@ class WeatherReading(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     location_id: int = Field(foreign_key="locations.id", nullable=False, index=True)
-    recorded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    recorded_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
+    )
 
     temperature_c: float = Field(nullable=False)
     wind_speed_kmh: float = Field(nullable=False)

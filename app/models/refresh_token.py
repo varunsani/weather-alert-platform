@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import Column, DateTime
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -18,8 +19,11 @@ class RefreshToken(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     jti: str = Field(index=True, unique=True, nullable=False, max_length=64)
     user_id: int = Field(foreign_key="users.id", nullable=False, index=True)
-    issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    expires_at: datetime = Field(nullable=False)
+    issued_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    expires_at: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
     revoked: bool = Field(default=False, nullable=False)
 
     user: Optional["User"] = Relationship(back_populates="refresh_tokens")

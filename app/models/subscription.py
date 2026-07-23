@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import Column, DateTime
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
 
@@ -14,7 +15,10 @@ class Subscription(SQLModel, table=True):
     user_id: int = Field(foreign_key="users.id", nullable=False, index=True)
     location_id: int = Field(foreign_key="locations.id", nullable=False, index=True)
     is_active: bool = Field(default=True, nullable=False)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
     user: Optional["User"] = Relationship(back_populates="subscriptions")
     location: Optional["Location"] = Relationship(back_populates="subscriptions")
