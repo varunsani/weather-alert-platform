@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI):
     await redis.aclose()
 
 
+
 app = FastAPI(
     title=settings.app_name,
     description="Real-time weather alerting platform: WebSocket push, Redis fan-out, JWT auth, Postgres time-series.",

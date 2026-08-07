@@ -35,7 +35,7 @@ import websockets
 
 BASE_URL = os.environ.get("SMOKE_BASE_URL", "http://localhost:8000")
 WS_BASE_URL = BASE_URL.replace("http://", "ws://").replace("https://", "wss://")
-REDIS_URL = os.environ.get("SMOKE_REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = os.environ.get("SMOKE_REDIS_URL", "redis://localhost:6380/0")
 
 PASS = "\033[92mPASS\033[0m"
 FAIL = "\033[91mFAIL\033[0m"
