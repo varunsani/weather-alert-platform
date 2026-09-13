@@ -2,24 +2,20 @@
    Weather Alert Platform — guided console
    ---------------------------------------------------------------
    Plain fetch + WebSocket client for the FastAPI backend documented
-   in the project README. A couple of request/response field names
-   (mainly for /auth/register and /auth/login) aren't verifiable from
-   the repo listing alone, so this client is deliberately defensive:
-   every request/response is written to the "Developer log" at the
-   bottom of the page, and login auto-falls-back between a JSON body
-   and an OAuth2-style form body. If a call 422s, open the log, check
-   the payload against your actual pydantic schema, and adjust the
-   small REQUEST SHAPES section below if needed.
+   in the project README. Every request/response shape below matches
+   the actual pydantic schemas in app/schemas/*.py exactly — nothing
+   here is guessed, so a failed call means a real backend error, not
+   a field-name mismatch. Every request/response is still written to
+   the "Developer log" at the bottom of the page for debugging.
    =================================================================== */
 
 /* ------------------------- REQUEST SHAPES -------------------------
-   Edit these if your backend's field names differ. */
+   Mirrors app/schemas/{auth,location,subscription}.py. */
 const SHAPES = {
   register: (u) => ({ username: u.username, email: u.email, password: u.password }),
-  loginJson: (u) => ({ username: u.identifier, email: u.identifier, password: u.password }),
-  loginForm: (u) => new URLSearchParams({ username: u.identifier, password: u.password, grant_type: "password" }),
-  location: (l) => ({ name: l.name, lat: Number(l.lat), lon: Number(l.lon) }),
-  subscribe: (id) => ({ location_id: id, id: id }),
+  login: (u) => ({ username: u.identifier, password: u.password }),
+  location: (l) => ({ name: l.name, latitude: Number(l.lat), longitude: Number(l.lon) }),
+  subscribe: (locationId) => ({ location_id: Number(locationId) }),
 };
 
 /* ------------------------- STATE ------------------------- */
@@ -28,8 +24,8 @@ const state = {
   access: localStorage.getItem("wap.access") || null,
   refresh: localStorage.getItem("wap.refresh") || null,
   user: JSON.parse(localStorage.getItem("wap.user") || "null"),
-  locations: [],       // [{id, name, lat, lon}]
-  subscriptions: [],   // [{location_id, name}]
+  locations: [],       // LocationRead[]: {id, name, latitude, longitude, timezone, created_at}
+  subscriptions: [],   // SubscriptionRead[]: {id, location_id, is_active, created_at, location}
   ws: null,
   logCount: 0,
 };
@@ -103,11 +99,25 @@ function fmtTime(iso) {
   try { return new Date(iso).toLocaleString(); } catch { return String(iso); }
 }
 
-function pick(obj, keys, fallback = "—") {
-  for (const k of keys) {
-    if (obj && obj[k] !== undefined && obj[k] !== null) return obj[k];
+function fmtNum(n, digits = 1) {
+  return typeof n === "number" ? n.toFixed(digits) : "—";
+}
+
+/* Turns a FastAPI 422 `detail` array (or any other error shape) into
+   one readable line instead of a dumped JSON blob. */
+function formatErrorDetail(detail) {
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d) => {
+        const loc = Array.isArray(d.loc) ? d.loc.filter((p) => p !== "body") : [];
+        const field = loc.length ? loc.join(".") : null;
+        return field ? `${field}: ${d.msg}` : d.msg;
+      })
+      .join("; ");
   }
-  return fallback;
+  if (typeof detail === "string") return detail;
+  if (detail !== undefined && detail !== null) return stringify(detail);
+  return null;
 }
 
 /* ------------------------- STEP LOCKING ------------------------- */
@@ -167,10 +177,10 @@ el.btnSettings.addEventListener("click", () => {
 });
 
 /* ------------------------- CORE FETCH WRAPPER ------------------------- */
-async function apiFetch(path, { method = "GET", body, auth = true, isForm = false, retry = true } = {}) {
+async function apiFetch(path, { method = "GET", body, auth = true, retry = true } = {}) {
   const url = state.apiBase.replace(/\/$/, "") + path;
   const headers = {};
-  if (body && !isForm) headers["Content-Type"] = "application/json";
+  if (body) headers["Content-Type"] = "application/json";
   if (auth && state.access) headers["Authorization"] = `Bearer ${state.access}`;
 
   let resp, data, ok;
@@ -178,27 +188,29 @@ async function apiFetch(path, { method = "GET", body, auth = true, isForm = fals
     resp = await fetch(url, {
       method,
       headers,
-      body: body ? (isForm ? body : JSON.stringify(body)) : undefined,
+      body: body ? JSON.stringify(body) : undefined,
     });
     ok = resp.ok;
     const text = await resp.text();
     try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   } catch (e) {
     logRequest({ method, url, body, error: e.message, ok: false });
-    throw new Error(`Network error reaching ${url} — is the server running and CORS-enabled? (${e.message})`);
+    throw new Error(`Network error reaching ${url} — is the server running and reachable? (${e.message})`);
   }
 
-  // Auto-refresh once on 401, then retry the original call.
-  if (!ok && resp.status === 401 && retry && state.refresh && path !== "/auth/refresh") {
+  // Auto-refresh once on 401 for non-auth calls, then retry the original call.
+  const isAuthEndpoint = path.startsWith("/auth/");
+  if (!ok && resp.status === 401 && retry && state.refresh && !isAuthEndpoint) {
     const refreshed = await tryRefresh();
-    if (refreshed) return apiFetch(path, { method, body, auth, isForm, retry: false });
+    if (refreshed) return apiFetch(path, { method, body, auth, retry: false });
   }
 
   logRequest({ method, url, body, status: resp.status, ok, response: data });
 
   if (!ok) {
-    const msg = (data && (data.detail || data.message)) || `HTTP ${resp.status}`;
-    const err = new Error(typeof msg === "string" ? msg : stringify(msg));
+    const detailMsg = data && formatErrorDetail(data.detail);
+    const msg = detailMsg || (data && data.message) || `HTTP ${resp.status}`;
+    const err = new Error(msg);
     err.status = resp.status;
     err.data = data;
     throw err;
@@ -240,39 +252,27 @@ async function handleRegister(e) {
     e.target.reset();
     setTab("login");
   } catch (err) {
-    toast(`Register failed: ${err.message}`, "err");
+    toast(`Could not create account: ${err.message}`, "err");
   }
 }
 
 async function handleLogin(e) {
   e.preventDefault();
   const f = Object.fromEntries(new FormData(e.target).entries());
-  let data;
   try {
-    // Attempt 1: JSON body (most custom FastAPI/pydantic login schemas).
-    data = await apiFetch("/auth/login", { method: "POST", body: SHAPES.loginJson(f), auth: false });
-  } catch (err1) {
-    try {
-      // Attempt 2: OAuth2PasswordRequestForm-style form body.
-      data = await apiFetch("/auth/login", { method: "POST", body: SHAPES.loginForm(f), auth: false, isForm: true });
-    } catch (err2) {
-      toast(`Login failed: ${err2.message}`, "err");
-      return;
-    }
+    const data = await apiFetch("/auth/login", { method: "POST", body: SHAPES.login(f), auth: false });
+    applyLoginResponse(data, f.identifier);
+  } catch (err) {
+    toast(`Login failed: ${err.message}`, "err");
   }
-  applyLoginResponse(data, f.identifier);
 }
 
 function applyLoginResponse(data, identifierGuess) {
-  const access = pick(data, ["access_token", "accessToken", "token"], null);
-  const refresh = pick(data, ["refresh_token", "refreshToken"], null);
-  if (!access) {
-    toast("Login response had no access_token — check the developer log for the actual shape.", "err");
-    return;
-  }
-  state.access = access;
-  state.refresh = refresh;
-  state.user = data.user || { username: identifierGuess };
+  // TokenPair: { access_token, refresh_token, token_type }. The backend
+  // doesn't return a user object on login, so we remember what was typed.
+  state.access = data.access_token;
+  state.refresh = data.refresh_token;
+  state.user = { username: identifierGuess };
   persistSession();
   renderSession();
   toast("Signed in.", "ok");
@@ -283,16 +283,14 @@ function applyLoginResponse(data, identifierGuess) {
 async function tryRefresh() {
   if (!state.refresh) return false;
   try {
+    // AccessTokenOnly: { access_token, token_type }
     const data = await apiFetch("/auth/refresh", {
       method: "POST",
       body: { refresh_token: state.refresh },
       auth: false,
       retry: false,
     });
-    const access = pick(data, ["access_token", "accessToken", "token"], null);
-    if (!access) return false;
-    state.access = access;
-    if (data.refresh_token) state.refresh = data.refresh_token;
+    state.access = data.access_token;
     persistSession();
     renderSession();
     return true;
@@ -317,7 +315,9 @@ async function handleLogout() {
   persistSession();
   renderSession();
   state.subscriptions = [];
+  state.locations = [];
   renderSubs();
+  renderLocations();
   toast("Signed out.", "ok");
 }
 
@@ -340,8 +340,8 @@ async function handleCreateLocation(e) {
 
 async function loadLocations() {
   try {
-    const data = await apiFetch("/locations", { method: "GET" });
-    state.locations = Array.isArray(data) ? data : (data.items || data.locations || []);
+    // list[LocationRead] — a plain array, always.
+    state.locations = await apiFetch("/locations", { method: "GET" });
     renderLocations();
   } catch (err) {
     toast(`Could not load locations: ${err.message}`, "err");
@@ -352,13 +352,12 @@ function renderLocations() {
   el.tblLocations.innerHTML = "";
   setEmptyHint("tblLocations", state.locations.length === 0);
   for (const loc of state.locations) {
-    const id = pick(loc, ["id", "location_id"]);
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${pick(loc, ["name"])}</td>
-      <td>${pick(loc, ["lat", "latitude"])}</td>
-      <td>${pick(loc, ["lon", "lng", "longitude"])}</td>
-      <td><button class="btn btn-secondary btn-tiny" data-subscribe="${id}">Subscribe</button></td>
+      <td>${escapeHtml(loc.name)}</td>
+      <td>${loc.latitude}</td>
+      <td>${loc.longitude}</td>
+      <td><button class="btn btn-secondary btn-tiny" data-subscribe="${loc.id}">Subscribe</button></td>
     `;
     el.tblLocations.appendChild(tr);
   }
@@ -372,10 +371,9 @@ function renderWeatherLocationSelect() {
   const current = el.selWeatherLocation.value;
   el.selWeatherLocation.innerHTML = `<option value="">— choose a location —</option>`;
   for (const loc of state.locations) {
-    const id = pick(loc, ["id", "location_id"]);
     const opt = document.createElement("option");
-    opt.value = id;
-    opt.textContent = `${pick(loc, ["name"])} (#${id})`;
+    opt.value = loc.id;
+    opt.textContent = `${loc.name} (#${loc.id})`;
     el.selWeatherLocation.appendChild(opt);
   }
   if ([...el.selWeatherLocation.options].some((o) => o.value === current)) {
@@ -409,8 +407,9 @@ async function unsubscribeFrom(locationId) {
 
 async function loadSubs() {
   try {
-    const data = await apiFetch("/subscriptions", { method: "GET" });
-    state.subscriptions = Array.isArray(data) ? data : (data.items || data.subscriptions || []);
+    // list[SubscriptionRead] — each item carries its own `location` object,
+    // so we never need to cross-reference the locations list to get a name.
+    state.subscriptions = await apiFetch("/subscriptions", { method: "GET" });
     renderSubs();
   } catch (err) {
     toast(`Could not load subscriptions: ${err.message}`, "err");
@@ -421,13 +420,11 @@ function renderSubs() {
   el.tblSubs.innerHTML = "";
   setEmptyHint("tblSubs", state.subscriptions.length === 0);
   for (const sub of state.subscriptions) {
-    const id = pick(sub, ["location_id", "id"]);
-    const loc = state.locations.find((l) => String(pick(l, ["id", "location_id"])) === String(id));
-    const name = pick(sub, ["name"], loc ? pick(loc, ["name"]) : `#${id}`);
+    const name = sub.location ? sub.location.name : `#${sub.location_id}`;
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${name}</td>
-      <td><button class="btn btn-danger btn-tiny" data-unsub="${id}">Unsubscribe</button></td>
+      <td>${escapeHtml(name)}</td>
+      <td><button class="btn btn-danger btn-tiny" data-unsub="${sub.location_id}">Unsubscribe</button></td>
     `;
     el.tblSubs.appendChild(tr);
   }
@@ -444,6 +441,7 @@ async function handleGetCurrent() {
   const id = el.selWeatherLocation.value;
   if (!id) return toast("Choose a location first.", "err");
   try {
+    // CurrentWeatherResponse
     const data = await apiFetch(`/weather/${id}/current`, { method: "GET" });
     renderCurrent(data);
   } catch (err) {
@@ -453,17 +451,16 @@ async function handleGetCurrent() {
 
 function renderCurrent(data) {
   el.currentReading.classList.remove("empty");
-  const temp = pick(data, ["temperature", "temp", "temperature_c"]);
-  const wind = pick(data, ["wind_speed", "windSpeed", "wind_kmh"]);
-  const precip = pick(data, ["precipitation", "precip", "precipitation_mm"]);
-  const code = pick(data, ["weather_code", "code"]);
-  const time = pick(data, ["timestamp", "time", "recorded_at"]);
+  const cacheNote = data.cache_hit
+    ? `<span class="cache-badge">from cache</span>`
+    : `<span class="cache-badge live">live fetch</span>`;
   el.currentReading.innerHTML = `
-    <div class="stat"><b>${temp}</b><span>Temp °C</span></div>
-    <div class="stat"><b>${wind}</b><span>Wind km/h</span></div>
-    <div class="stat"><b>${precip}</b><span>Precip mm</span></div>
-    <div class="stat"><b>${code}</b><span>WMO code</span></div>
-    <div class="stat"><b>${fmtTime(time)}</b><span>As of</span></div>
+    <div class="stat"><b>${fmtNum(data.temperature_c)}</b><span>Temp °C</span></div>
+    <div class="stat"><b>${fmtNum(data.wind_speed_kmh)}</b><span>Wind km/h</span></div>
+    <div class="stat"><b>${fmtNum(data.precipitation_mm)}</b><span>Precip mm</span></div>
+    <div class="stat"><b>${data.weather_code}</b><span>WMO code</span></div>
+    <div class="stat"><b>${fmtTime(data.recorded_at)}</b><span>As of</span></div>
+    <div class="stat">${cacheNote}<span>Source</span></div>
   `;
 }
 
@@ -472,8 +469,8 @@ async function handleGetHistory() {
   if (!id) return toast("Choose a location first.", "err");
   const limit = el.historyLimit.value || 10;
   try {
-    const data = await apiFetch(`/weather/${id}/history?limit=${encodeURIComponent(limit)}`, { method: "GET" });
-    const rows = Array.isArray(data) ? data : (data.items || data.readings || []);
+    // list[WeatherReadingRead] — a plain array, always.
+    const rows = await apiFetch(`/weather/${id}/history?limit=${encodeURIComponent(limit)}`, { method: "GET" });
     renderHistory(rows);
   } catch (err) {
     toast(`Could not fetch history: ${err.message}`, "err");
@@ -486,11 +483,11 @@ function renderHistory(rows) {
   for (const r of rows) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${fmtTime(pick(r, ["timestamp", "time", "recorded_at"]))}</td>
-      <td>${pick(r, ["temperature", "temp", "temperature_c"])}</td>
-      <td>${pick(r, ["wind_speed", "windSpeed", "wind_kmh"])}</td>
-      <td>${pick(r, ["precipitation", "precip", "precipitation_mm"])}</td>
-      <td>${pick(r, ["weather_code", "code"])}</td>
+      <td>${fmtTime(r.recorded_at)}</td>
+      <td>${fmtNum(r.temperature_c)}</td>
+      <td>${fmtNum(r.wind_speed_kmh)}</td>
+      <td>${fmtNum(r.precipitation_mm)}</td>
+      <td>${r.weather_code}</td>
     `;
     el.tblHistory.appendChild(tr);
   }
@@ -551,37 +548,41 @@ function setWsUi(status) {
   el.btnWsDisconnect.disabled = !(status === "live" || status === "connecting");
 }
 
+/* Every message on /ws/alerts is one of exactly two documented shapes
+   (see app/routers/ws.py and app/schemas/alert.py::AlertPushMessage):
+     { type: "connected", message, location_ids }
+     { type: "alert", location_id, location_name, severity, condition_type,
+       message, temperature_c, wind_speed_kmh, precipitation_mm,
+       weather_code, created_at }                                        */
 function renderIncoming(msg) {
   const empty = el.alertFeed.querySelector(".empty-hint");
   if (empty) empty.remove();
 
-  const type = (msg && (msg.type || msg.event)) || "";
-  const isConnected = String(type).toLowerCase().includes("connect") || (msg && msg.message === "connected");
-
-  const severity = (msg && pick(msg, ["severity", "tier", "level"], "")) || "";
+  const isConnected = !!msg && msg.type === "connected";
+  const severity = (!isConnected && msg && msg.severity) || "";
   const tierClass = isConnected
     ? "tier-info"
-    : /severe/i.test(severity)
+    : severity === "SEVERE"
     ? "tier-severe"
-    : /warn/i.test(severity)
+    : severity === "WARNING"
     ? "tier-warning"
-    : /watch/i.test(severity)
+    : severity === "WATCH"
     ? "tier-watch"
     : "tier-info";
 
   const title = isConnected
     ? "Connected"
-    : pick(msg, ["title", "message", "category"], "Alert received");
+    : `${msg.location_name} — ${String(msg.condition_type || "").replaceAll("_", " ").toLowerCase()}`;
 
   const detail = isConnected
-    ? `Subscribed location_ids: ${stringify(pick(msg, ["location_ids", "locations"], []))}`
-    : stringify(msg);
+    ? `Watching ${msg.location_ids.length} location(s): ${msg.location_ids.join(", ") || "none yet"}`
+    : `${msg.message} (${fmtNum(msg.temperature_c)}°C, ${fmtNum(msg.wind_speed_kmh)} km/h wind, ${fmtNum(msg.precipitation_mm)} mm precip)`;
 
   const card = document.createElement("div");
   card.className = `alert-card ${tierClass}`;
   card.innerHTML = `
     <div class="row1"><span class="badge">${severity || (isConnected ? "info" : "alert")}</span><span>${new Date().toLocaleTimeString()}</span></div>
-    <div class="row2">${escapeHtml(String(title))}</div>
+    <div class="row2">${escapeHtml(title)}</div>
     <div class="log-body">${escapeHtml(truncate(detail, 400))}</div>
   `;
   el.alertFeed.prepend(card);
